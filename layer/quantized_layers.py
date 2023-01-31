@@ -18,7 +18,7 @@ def ste_floor(x):
         return dy
     return x, grad
 
-class QuntizedAct(tf.keras.layers.Layer):
+class QuantizedAct(tf.keras.layers.Layer):
 
     def __init__(self,
                  quant=False,
@@ -28,7 +28,7 @@ class QuntizedAct(tf.keras.layers.Layer):
                  calibration_mode='layer_wise',
                  observer_str='minmax',
                  quantizer_str='uniform'):
-        super(QunaitzedAct, self).__init__()
+        super(QuantizedAct, self).__init__()
 
         self.quant = quant
         self.calibrate = calibrate
@@ -44,14 +44,16 @@ class QuntizedAct(tf.keras.layers.Layer):
         self.quantizer = build_quantizer(self.quantizer_str, self.bit_type,
                                          self.observer, self.module_type)
 
-    def call(self, x):
+    def call(self, x, channel_first = False):
+        #print("[DEBUG] QAct calibrate: ", self.calibrate)
         if self.calibrate:
-            self.quantizer.observer.update(x)
+            #print("[DEBUG] calibrate start")
+            self.quantizer.observer.update(x, channel_first)
             if self.last_calibrate:
-                self.quantizer.update_quantization_params(x)
+                self.quantizer.update_quantization_params(x, channel_first)
         if not self.quant:
             return x
-        x = self.quantizer(x)
+        x = self.quantizer(x, channel_first)
         return x
 
 
@@ -68,6 +70,8 @@ class QuantizedLinear(tf.keras.layers.Dense):
                  calibration_mode='layer_wise',
                  observer_str='minmax',
                  quantizer_str='uniform'):
+        #print("[DEBUG] QLinear name: ", name)
+        #sys.exit()
         super(QuantizedLinear, self).__init__(
                 units = units,
                 use_bias = use_bias,
@@ -87,28 +91,32 @@ class QuantizedLinear(tf.keras.layers.Dense):
         self.quantizer = build_quantizer(self.quantizer_str, self.bit_type,
                                          self.observer, self.module_type)
 
-    def forward(self, x):
+    def call(self, x, channel_first = False):
+        #print("[DEBUG] QLinear calibrate: ", self.calibrate)
         if self.calibrate:
-            self.quantizer.observer.update(self.weight)
+            #print("------------------------[DEBUG] QLinear calibrate start------: ", self.calibrate)
+            self.quantizer.observer.update(self.kernel, channel_first)
             if self.last_calibrate:
-                self.quantizer.update_quantization_params(x)
+                self.quantizer.update_quantization_params(x, channel_first)
         if not self.quant:
             return super().call(x)
-        self.kernel = self.quantizer(self.kernel)
+        self.kernel = self.quantizer(self.kernel, channel_first)
 
         return super().call(x)
 
 class QuantizedConv2d(tf.keras.layers.Conv2D):
 
     def __init__(self,
-                 in_channels,
-                 out_channels,
+                 filters,
                  kernel_size,
-                 stride=1,
-                 padding=0,
+                 strides=1,
+                 padding='valid',
                  dilation=1,
                  groups=1,
-                 bias=True,
+                 use_bias=True,
+                 kernel_initializer=None,
+                 bias_initializer= None,
+                 name= None,
                  quant=False,
                  calibrate=False,
                  last_calibrate=False,
@@ -117,13 +125,16 @@ class QuantizedConv2d(tf.keras.layers.Conv2D):
                  observer_str='minmax',
                  quantizer_str='uniform'):
         super(QuantizedConv2d, self).__init__(
-            filters=out_channels,
+            filters=filters,
             kernel_size=kernel_size,
-            strides=stride,
+            strides=strides,
             padding=padding,
             dilation_rate=dilation,
+            kernel_initializer=kernel_initializer,
+            bias_initializer=bias_initializer,
+            name = name,
             groups=groups,
-            use_bias=bias,
+            use_bias=use_bias,
         )
         self.quant = quant
         self.calibrate = calibrate
@@ -139,14 +150,14 @@ class QuantizedConv2d(tf.keras.layers.Conv2D):
         self.quantizer = build_quantizer(self.quantizer_str, self.bit_type,
                                          self.observer, self.module_type)
 
-    def call(self, x):
+    def call(self, x, channel_first = False):
         if self.calibrate:
-            self.quantizer.observer.update(self.kernel)
+            self.quantizer.observer.update(self.kernel, channel_first)
             if self.last_calibrate:
-                self.quantizer.update_quantization_params(x)
+                self.quantizer.update_quantization_params(x, channel_first)
         if not self.quant:
             return super().call(x)
-        self.kernel = self.quantizer(self.kernel)
+        self.kernel = self.quantizer(self.kernel, channel_first)
         return super().call(x)
 
 class QuantizedLayerNorm(tf.keras.layers.LayerNormalization):
