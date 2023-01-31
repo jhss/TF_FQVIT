@@ -4,6 +4,7 @@ Based on timm/models/visual_transformer.py by Ross Wightman.
 Based on transformers/models/vit by HuggingFace
 Copyright 2021 Martins Bruveris
 """
+import sys
 from collections import OrderedDict
 from dataclasses import dataclass
 from typing import List, Optional, Tuple, Union
@@ -11,12 +12,11 @@ from typing import List, Optional, Tuple, Union
 import tensorflow as tf
 
 from layer.quantized_layers import QAct, QConv2d, QLinear
+from layer.tfimm_layers import QMLP, QPatchEmbeddings 
 from quantizer.bit_type import BIT_TYPE_DICT
 
 from tfimm.layers import (
-    MLP,
     DropPath,
-    PatchEmbeddings,
     interpolate_pos_embeddings,
     norm_layer_factory,
 )
@@ -162,7 +162,15 @@ class ViTMultiHeadAttention(tf.keras.layers.Layer):
         self.scale = head_dim**-0.5
         
         #print("[DEBUG] attention cfg: ", cfg)
-        self.qkv = QLinear(units = 3 * embed_dim, use_bias = qkv_bias, name = "qkv")
+        self.qkv = QLinear(units = 3 * embed_dim, 
+                           use_bias = qkv_bias, 
+                           name = "qkv",
+                           quant=quant,
+                           calibrate=calibrate,
+                           bit_type=cfg.BIT_TYPE_W,
+                           calibration_mode=cfg.CALIBRATION_MODE_W,
+                           observer_str=cfg.OBSERVER_W,
+                           quantizer_str=cfg.QUANTIZER_W)
         self.qact1 = QAct(quant=quant,
                           calibrate=calibrate,
                           bit_type=cfg.BIT_TYPE_A,
@@ -178,7 +186,15 @@ class ViTMultiHeadAttention(tf.keras.layers.Layer):
         
         
         self.attn_drop = tf.keras.layers.Dropout(rate=attn_drop_rate)
-        self.proj = QLinear(units=embed_dim, name="proj")
+        self.proj = QLinear(units=embed_dim, 
+                            name="proj",
+                            quant=quant,
+                            calibrate=calibrate,
+                            bit_type=cfg.BIT_TYPE_W,
+                            calibration_mode=cfg.CALIBRATION_MODE_W,
+                            observer_str=cfg.OBSERVER_W,
+                            quantizer_str=cfg.QUANTIZER_W)
+        
         self.qact3 = QAct(quant=quant,
                           calibrate=calibrate,
                           bit_type=cfg.BIT_TYPE_A,
@@ -201,8 +217,13 @@ class ViTMultiHeadAttention(tf.keras.layers.Layer):
         # B (batch size), N (sequence length), D (embedding dimension),
         # H (number of heads)
         batch_size, seq_length = tf.unstack(tf.shape(x)[:2])
+        print("[DEBUG] qkv Qlinear start-----------------------------")
         qkv = self.qkv(x)  # (B, N, 3*D)
-        x = self.qact1(x) 
+        print("[DEBUG] qkv.shape: ", qkv.shape)
+        print("[DEBUG] qkv QLinear end-------------------------------")
+        print("[DEBUG} qact1 start---------------------------")
+        qkv = self.qact1(qkv) 
+        print("[DEBUG} qact1 end---------------------------")
         
         qkv = tf.reshape(qkv, (batch_size, seq_length, 3, self.nb_heads, -1))
         qkv = tf.transpose(qkv, (2, 0, 3, 1, 4))  # (3, B, H, N, D/H)
@@ -210,7 +231,9 @@ class ViTMultiHeadAttention(tf.keras.layers.Layer):
         # -----------------------------------------
         
         attn = self.scale * tf.linalg.matmul(q, k, transpose_b=True)  # (B, H, N, N)
-        attn = self.qact_attn1(attn)
+        print("[DEBUG} qact_attn1 start---------------------------")
+        attn = self.qact_attn1(attn, channel_first = True)
+        print("[DEBUG} qact_attn1 end---------------------------")
         attn = tf.nn.softmax(attn, axis=-1)  # (B, H, N, N)
         attn = self.attn_drop(attn, training=training)
         features["attn"] = attn
@@ -218,9 +241,15 @@ class ViTMultiHeadAttention(tf.keras.layers.Layer):
         x = tf.linalg.matmul(attn, v)  # (B, H, N, D/H)
         x = tf.transpose(x, (0, 2, 1, 3))  # (B, N, H, D/H)
         x = tf.reshape(x, (batch_size, seq_length, -1))  # (B, N, D)
+        print("[DEBUG] qact2 start -------------------------------------")
         x = self.qact2(x)
+        print("[DEBUG] qact2 end -------------------------------------")
+        print("[DEBUG] proj QLienar Start-----------------------------")
         x = self.proj(x)
+        print("[DEBUG] proj QLinear end-------------------------------")
+        print("[DEBUG] qact3 start -------------------------------------")
         x = self.qact3(x)
+        print("[DEBUG] qact3 end -------------------------------------")
         x = self.proj_drop(x, training=training)
         return (x, features) if return_features else x
 
@@ -287,11 +316,14 @@ class ViTBlock(tf.keras.layers.Layer):
                           observer_str=cfg.OBSERVER_A,
                           quantizer_str=cfg.QUANTIZER_A)
         
-        self.mlp = MLP(
+        self.mlp = QMLP(
             hidden_dim=int(embed_dim * mlp_ratio),
             embed_dim=embed_dim,
             drop_rate=drop_rate,
             act_layer=act_layer,
+            quant = quant,
+            calibrate = calibrate,
+            cfg = cfg,
             name="mlp",
         )
         self.qact4 = QAct(quant=quant,
@@ -303,28 +335,42 @@ class ViTBlock(tf.keras.layers.Layer):
         
 
     def call(self, x, training=False, return_features=False):
+        #print("[DEBUG] block self.calibrate: ", self.calibrate)
         features = OrderedDict()
         shortcut = x
         x = self.norm1(x, training=training)
+        #print("[DEBUG] block qact1 start---------------------------------")
         x = self.qact1(x)
+        #print("[DEBUG] block qact1 end---------------------------------")
+        #print("[DEBUG] multi head start----------------------------------")
         x = self.attn(x, training=training, return_features=return_features)
+        #print("[DEBUG] multi head end----------------------------------")
         if return_features:
             x, mha_features = x
             features["attn"] = mha_features["attn"]
         x = self.drop_path(x, training=training)
         x = x + shortcut
         
+        #print("[DEBUG] block qact2 start---------------------------------")
         x = self.qact2(x)
-
+        #print("[DEBUG] block qact2 end---------------------------------")
+        
         shortcut = x
         x = self.norm2(x, training=training)
+        #print("[DEBUG] block qact3 start---------------------------------")
         x = self.qact3(x)
+        #print("[DEBUG] block qact3 end---------------------------------")
         
         x = self.mlp(x, training=training)
         x = self.drop_path(x, training=training)
         x = x + shortcut
         
+        #print("[DEBUG] block qact4 start---------------------------------")
         x = self.qact4(x)
+        #print("[DEBUG] block qact4 end---------------------------------")
+        
+        #if x.shape[0] == 100:
+        #    sys.exit()
         
         return (x, features) if return_features else x
 
@@ -414,11 +460,14 @@ class QViT(tf.keras.Model):
                                    quantizer_str=cfg.QUANTIZER_A)
 
         if cfg.patch_layer == "patch_embeddings":
-            self.patch_embed = PatchEmbeddings(
+            self.patch_embed = QPatchEmbeddings(
                 patch_size=cfg.patch_size,
                 embed_dim=cfg.embed_dim,
                 norm_layer="",  # ViT does not use normalization in patch embeddings
                 name="patch_embed",
+                quant = quant,
+                calibrate = calibrate,
+                cfg = cfg,
             )
         elif cfg.patch_layer == "hybrid_embeddings":
             self.patch_embed = HybridEmbeddings(
@@ -553,19 +602,84 @@ class QViT(tf.keras.Model):
         _, features = self(self.dummy_inputs, return_features=True)
         return list(features.keys())
     
-    def open_calibrate(self):
-        for m in self.__dict__.values():
-            #print("moduel: ", m, " type: ", type(self.__dict__[m]))
-            #if type(m) in [QConv2d, QLinear, QAct, QIntSoftmax]:
+    def quant(self):
+        for key, m in self.__dict__.items():
             if type(m) in [QConv2d, QLinear, QAct]:
-                print("[DEBUG] calibrate m: ", m)
+                m.quant = True
+                
+            if type(m) == QPatchEmbeddings:
+                for sub_m in m.__dict__.values():
+                    if type(sub_m) in [QConv2d, QLinear, QAct]:
+                        sub_m.quant = True
+                               
+            if key == 'blocks':
+                for sub_m in m.__dict__['_last_wrapped_list_snapshot']:
+                    for ssub_m in sub_m.__dict__.values():
+                        if type(ssub_m) in [QConv2d, QLinear, QAct]:
+                            ssub_m.quant = True
+                            
+                        if type(ssub_m) in [ViTMultiHeadAttention, QMLP]:
+                            for s3ub_m in ssub_m.__dict__.values():
+                                if type(s3ub_m) in [QConv2d, QLinear, QAct]:
+                                    s3ub_m.quant = True
+        
+    def open_calibrate(self):
+        for key, m in self.__dict__.items():
+            if type(m) in [QConv2d, QLinear, QAct]:
                 m.calibrate = True
                 
+            if type(m) == QPatchEmbeddings:
+                for sub_m in m.__dict__.values():
+                    if type(sub_m) in [QConv2d, QLinear, QAct]:
+                        sub_m.calibrate = True
+                               
+            if key == 'blocks':
+                for sub_m in m.__dict__['_last_wrapped_list_snapshot']:
+                    for ssub_m in sub_m.__dict__.values():
+                        if type(ssub_m) in [QConv2d, QLinear, QAct]:
+                            ssub_m.calibrate = True
+                            
+                        if type(ssub_m) in [ViTMultiHeadAttention, QMLP]:
+                            for s3ub_m in ssub_m.__dict__.values():
+                                if type(s3ub_m) in [QConv2d, QLinear, QAct]:
+                                    s3ub_m.calibrate = True
+                                    
+    def open_last_calibrate(self):
+        for key, m in self.__dict__.items():
+            if type(m) in [QConv2d, QLinear, QAct]:
+                m.last_calibrate = True
+                
+            if type(m) == QPatchEmbeddings:
+                for sub_m in m.__dict__.values():
+                    if type(sub_m) in [QConv2d, QLinear, QAct]:
+                        sub_m.last_calibrate = True            
+                
+            if key == 'blocks':
+                for sub_m in m.__dict__['_last_wrapped_list_snapshot']:
+                    for ssub_m in sub_m.__dict__.values():
+                        if type(ssub_m) in [QConv2d, QLinear, QAct]:
+                            ssub_m.last_calibrate = True
+                            
+                        if type(ssub_m) in [ViTMultiHeadAttention, QMLP]:
+                            for s3ub_m in ssub_m.__dict__.values():
+                                if type(s3ub_m) in [QConv2d, QLinear, QAct]:
+                                    s3ub_m.last_calibrate = True
+                            
     def close_calibrate(self):
-        for m in self.__dict__.values():
-            #if type(m) in [QConv2d, QLinear, QAct, QIntSoftmax]:
+        for key, m in self.__dict__.items():
             if type(m) in [QConv2d, QLinear, QAct]:
                 m.calibrate = False
+                
+            if key == 'blocks':
+                for sub_m in m.__dict__['_last_wrapped_list_snapshot']:
+                    for ssub_m in sub_m.__dict__.values():
+                        if type(ssub_m) in [QConv2d, QLinear, QAct]:
+                            ssub_m.calibrate = False
+                            
+                        if type(ssub_m) == ViTMultiHeadAttention:
+                            for s3ub_m in ssub_m.__dict__.values():
+                                if type(s3ub_m) in [QConv2d, QLinear, QAct]:
+                                    s3ub_m.calibrate = False
 
     def transform_pos_embed(self, target_cfg: QViTConfig):
         return interpolate_pos_embeddings(
@@ -583,14 +697,19 @@ class QViT(tf.keras.Model):
             x = self.qact_input(x)
 
         x, grid_size = self.patch_embed(x, return_shape=True)
+        #if x.shape[0] == 100:
+        #    sys.exit()
         cls_token = tf.repeat(self.cls_token, repeats=batch_size, axis=0)
         if not self.cfg.distilled:
             x = tf.concat((cls_token, x), axis=1)
         else:
             dist_token = tf.repeat(self.dist_token, repeats=batch_size, axis=0)
             x = tf.concat((cls_token, dist_token, x), axis=1)
-            
+        
+        #print("[DEBUG] before qact_embed-----------------------")
         x = self.qact_embed(x)
+        #print("[DEBUG] after qact_embed-----------------------")
+        #print("[DEBUG] before qact_pos------------------------")
         if not self.cfg.interpolate_input:
             pos_embed = self.qact_pos(self.pos_embed)
             x = x + pos_embed
@@ -603,19 +722,25 @@ class QViT(tf.keras.Model):
             )
             pos_embed = self.qact_pos(pos_embed)
             x = x + pos_embed
-            
+        #print("[DEBUG] after qact_pos-------------------------")
+        #sys.exit()
+        #print("[DEBUG] before qact1---------------------------")
         x = self.qact1(x)
+        #print("[DEBUG] after qact1---------------------------")
         x = self.pos_drop(x, training=training)
         features["patch_embedding"] = x
 
         for j, block in enumerate(self.blocks):
+            #print(f"-------------------------------------------[DEBUG] before {j}th block-----------------------------------------")
             x = block(x, training=training, return_features=return_features)
+            #print(f"-------------------------------------------[DEBUG] after {j}th block------------------------------------------")
             if return_features:
                 x, block_features = x
                 features[f"block_{j}/attn"] = block_features["attn"]
             features[f"block_{j}"] = x
         x = self.norm(x, training=training)
-        x = self.qact2(x)
+        #print("----------------------AFter Block--------------------------")
+        
         features["features_all"] = x
 
         if self.cfg.distilled:
@@ -627,6 +752,10 @@ class QViT(tf.keras.Model):
         else:
             x = x[:, 0]
         features["features"] = x
+        #print("[DEBUG] before qact2----------------------------------")
+        #print("[DEBUG] qact2 input shape: ", x.shape)
+        x = self.qact2(x)
+        #print("[DEBUG] after qact2-----------------------------------")
         return (x, features) if return_features else x
 
     def call(self, x, training=False, return_features=False):
@@ -634,14 +763,19 @@ class QViT(tf.keras.Model):
         x = self.forward_features(x, training, return_features)
         if return_features:
             x, features = x
+        #print("[DEBUG] before head------------------------------------------")
         if not self.cfg.distilled:
             x = self.head(x)
         else:
             y = self.head(x[:, 0])
             y_dist = self.head_dist(x[:, 1])
             x = tf.stack((y, y_dist), axis=1)
-            
+        #print("[DEBUG] after head------------------------------------------")
+        #print("[DEBUG] before act_out--------------------------------------")
         x = self.act_out(x)
+        #print("[DEBUG] after act_out---------------------------------------")
+        #if x.shape[0] == 100:
+        #    sys.exit()
         features["logits"] = x
         return (x, features) if return_features else x
 

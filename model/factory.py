@@ -67,7 +67,9 @@ def create_model(
             # Url can be "[timm]timm_model_name" or "[timm]" in which case we default
             # to model_name.
             timm_model_name = cfg.url[len("[timm]") :] or model_name
+            print("[DEBUG] timm_Model_name: ", timm_model_name)
             if timm_model_name[0] == 'q':
+                print("[DEBUG] before name: ", timm_model_name)
                 timm_model_name = timm_model_name[1:]
             load_timm_weights(loaded_model, timm_model_name)
         elif cfg.url.startswith("[pytorch]"):
