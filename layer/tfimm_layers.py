@@ -23,7 +23,7 @@ class QMLP(tf.keras.layers.Layer):
     ):
         super().__init__(**kwargs)
         act_layer = act_layer_factory(act_layer)
-        
+
         self.fc1 = QLinear(units = hidden_dim,
                            quant=quant,
                            calibrate=calibrate,
@@ -56,20 +56,22 @@ class QMLP(tf.keras.layers.Layer):
 
         self.drop1 = tf.keras.layers.Dropout(rate=drop_rate)
         self.drop2 = tf.keras.layers.Dropout(rate=drop_rate)
+        
+        self.quantized_layers = [self.fc1, self.qact1, self.fc2, self.qact2]
 
     def call(self, x, training=False):
         print("----------------QMLP START----------------")
         x = self.fc1(x)
         
         x = self.act(x)
-        print("----------------QACT1 START-----------------")
+        #print("----------------QACT1 START-----------------")
         x = self.qact1(x)
-        print("----------------QACT1 END-----------------")
+        #print("----------------QACT1 END-----------------")
         x = self.drop1(x, training=training)
         x = self.fc2(x)
-        print("----------------QACT2 START-----------------")
+        #print("----------------QACT2 START-----------------")
         x = self.qact2(x)
-        print("----------------QACT2 END-----------------")
+        #print("----------------QACT2 END-----------------")
         x = self.drop2(x, training=training)
         print("----------------QMLP END----------------")
         return x
@@ -135,16 +137,24 @@ class QPatchEmbeddings(tf.keras.layers.Layer):
             use_bias=True,
             kernel_initializer=kernel_initializer,
             bias_initializer=bias_initializer,
+            quant=quant,
+            calibrate=calibrate,
+            bit_type=cfg.BIT_TYPE_W,
+            calibration_mode=cfg.CALIBRATION_MODE_W,
+            observer_str=cfg.OBSERVER_W,
+            quantizer_str=cfg.QUANTIZER_W,
             name="proj",
         )
-        self.norm = self.norm_layer(name="norm")
         
+        self.norm = self.norm_layer(name="norm")
         self.qact = QAct(quant=quant,
                          calibrate=calibrate,
                          bit_type=cfg.BIT_TYPE_A,
                          calibration_mode=cfg.CALIBRATION_MODE_A,
                          observer_str=cfg.OBSERVER_A,
                          quantizer_str=cfg.QUANTIZER_A)
+        
+        self.quantized_layers = [self.projection, self.qact]
 
     def call(self, x, training=False, return_shape=False):
         """
