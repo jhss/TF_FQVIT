@@ -11,7 +11,7 @@ from typing import List, Optional, Tuple, Union
 
 import tensorflow as tf
 
-from layer.quantized_layers import QAct, QConv2d, QLinear
+from layer.quantized_layers import QAct, QConv2d, QLinear, QuantizedLayerNorm, QuantizedSoftmax
 from layer.tfimm_layers import QMLP, QPatchEmbeddings 
 from quantizer.bit_type import BIT_TYPE_DICT
 
@@ -80,10 +80,24 @@ class QViTConfig(ModelConfig):
     CALIBRATION_MODE_A = 'layer_wise'
     CALIBRATION_MODE_S = 'layer_wise'
     
+    INT_SOFTMAX = False
+    BIT_TYPE_S = BIT_TYPE_DICT['uint8']
+    OBSERVER_S = OBSERVER_A
+    QUANTIZER_S = QUANTIZER_A
+    
     INT_NORM = False
     OBSERVER_A_LN = OBSERVER_A
     CALIBRATION_MODE_A_LN = CALIBRATION_MODE_A
     
+    INT_SOFTMAX = False
+    BIT_TYPE_S = BIT_TYPE_DICT['uint8']
+    OBSERVER_S = OBSERVER_A
+    QUANTIZER_S = QUANTIZER_A
+            
+    INT_NORM = False
+    OBSERVER_A_LN = OBSERVER_A
+    CALIBRATION_MODE_A_LN = CALIBRATION_MODE_A
+        
     """
     Args:
         nb_classes: Number of classes for classification head
@@ -208,8 +222,19 @@ class ViTMultiHeadAttention(tf.keras.layers.Layer):
                                observer_str=cfg.OBSERVER_A,
                                quantizer_str=cfg.QUANTIZER_A)
         
-        
+        self.quantized_softmax = QuantizedSoftmax(log_i_softmax=cfg.INT_SOFTMAX,
+                                                  quant=quant,
+                                                  calibrate=calibrate,
+                                                  bit_type=cfg.BIT_TYPE_S,
+                                                  calibration_mode=cfg.CALIBRATION_MODE_S,
+                                                  observer_str=cfg.OBSERVER_S,
+                                                  quantizer_str=cfg.QUANTIZER_S)
+                
         self.proj_drop = tf.keras.layers.Dropout(rate=drop_rate)
+        
+        self.quantized_layers = [self.qkv, self.qact1, self.qact2, 
+                                 self.proj, self.qact3, self.qact_attn1,
+                                 self.quantized_softmax]
 
     def call(self, x, training=False, return_features=False):
         features = OrderedDict()
@@ -217,13 +242,13 @@ class ViTMultiHeadAttention(tf.keras.layers.Layer):
         # B (batch size), N (sequence length), D (embedding dimension),
         # H (number of heads)
         batch_size, seq_length = tf.unstack(tf.shape(x)[:2])
-        print("[DEBUG] qkv Qlinear start-----------------------------")
+        #print("[DEBUG] qkv Qlinear start-----------------------------")
         qkv = self.qkv(x)  # (B, N, 3*D)
-        print("[DEBUG] qkv.shape: ", qkv.shape)
-        print("[DEBUG] qkv QLinear end-------------------------------")
-        print("[DEBUG} qact1 start---------------------------")
+        #print("[DEBUG] qkv.shape: ", qkv.shape)
+        #print("[DEBUG] qkv QLinear end-------------------------------")
+        #print("[DEBUG} qact1 start---------------------------")
         qkv = self.qact1(qkv) 
-        print("[DEBUG} qact1 end---------------------------")
+        #print("[DEBUG} qact1 end---------------------------")
         
         qkv = tf.reshape(qkv, (batch_size, seq_length, 3, self.nb_heads, -1))
         qkv = tf.transpose(qkv, (2, 0, 3, 1, 4))  # (3, B, H, N, D/H)
@@ -231,25 +256,26 @@ class ViTMultiHeadAttention(tf.keras.layers.Layer):
         # -----------------------------------------
         
         attn = self.scale * tf.linalg.matmul(q, k, transpose_b=True)  # (B, H, N, N)
-        print("[DEBUG} qact_attn1 start---------------------------")
+        #print("[DEBUG} qact_attn1 start---------------------------")
         attn = self.qact_attn1(attn, channel_first = True)
-        print("[DEBUG} qact_attn1 end---------------------------")
-        attn = tf.nn.softmax(attn, axis=-1)  # (B, H, N, N)
+        #print("[DEBUG} qact_attn1 end---------------------------")
+        #attn = tf.nn.softmax(attn, axis=-1)  # (B, H, N, N) [HERE]
+        attn = self.quantized_softmax(attn, self.qact_attn1.quantizer.scale)
         attn = self.attn_drop(attn, training=training)
         features["attn"] = attn
 
         x = tf.linalg.matmul(attn, v)  # (B, H, N, D/H)
         x = tf.transpose(x, (0, 2, 1, 3))  # (B, N, H, D/H)
         x = tf.reshape(x, (batch_size, seq_length, -1))  # (B, N, D)
-        print("[DEBUG] qact2 start -------------------------------------")
+        #print("[DEBUG] qact2 start -------------------------------------")
         x = self.qact2(x)
-        print("[DEBUG] qact2 end -------------------------------------")
-        print("[DEBUG] proj QLienar Start-----------------------------")
+        #print("[DEBUG] qact2 end -------------------------------------")
+        #print("[DEBUG] proj QLienar Start-----------------------------")
         x = self.proj(x)
-        print("[DEBUG] proj QLinear end-------------------------------")
-        print("[DEBUG] qact3 start -------------------------------------")
+        #print("[DEBUG] proj QLinear end-------------------------------")
+        #print("[DEBUG] qact3 start -------------------------------------")
         x = self.qact3(x)
-        print("[DEBUG] qact3 end -------------------------------------")
+        #print("[DEBUG] qact3 end -------------------------------------")
         x = self.proj_drop(x, training=training)
         return (x, features) if return_features else x
 
@@ -281,9 +307,11 @@ class ViTBlock(tf.keras.layers.Layer):
         self.drop_path_rate = drop_path_rate
         self.norm_layer = norm_layer
         self.act_layer = act_layer
-        norm_layer = norm_layer_factory(norm_layer)
 
-        self.norm1 = norm_layer(name="norm1")
+        #norm_layer = norm_layer_factory(norm_layer)
+        norm_layer = QuantizedLayerNorm
+
+        self.norm1 = norm_layer(name="norm1", eps = 1e-6)
         self.qact1 = QAct(quant=quant,
                           calibrate=calibrate,
                           bit_type=cfg.BIT_TYPE_A,
@@ -308,7 +336,7 @@ class ViTBlock(tf.keras.layers.Layer):
                           observer_str=cfg.OBSERVER_A_LN,
                           quantizer_str=cfg.QUANTIZER_A_LN)
         
-        self.norm2 = norm_layer(name="norm2")
+        self.norm2 = norm_layer(name="norm2", eps = 1e-6)
         self.qact3 = QAct(quant=quant,
                           calibrate=calibrate,
                           bit_type=cfg.BIT_TYPE_A,
@@ -333,12 +361,21 @@ class ViTBlock(tf.keras.layers.Layer):
                           observer_str=cfg.OBSERVER_A_LN,
                           quantizer_str=cfg.QUANTIZER_A_LN)
         
+        self.quantized_layers = [self.norm1, self.qact1, self.attn, self.qact2, 
+                                 self.norm2, self.qact3, self.mlp, self.qact4]
 
-    def call(self, x, training=False, return_features=False):
+    def call(self, x, training=False, return_features=False, last_quantizer = None, apply_quant = False):
         #print("[DEBUG] block self.calibrate: ", self.calibrate)
         features = OrderedDict()
         shortcut = x
-        x = self.norm1(x, training=training)
+        print("----------------[DEBUG] Layer norm1 start------------------")
+        x = self.norm1(x, training=training, 
+                       in_quantizer = last_quantizer,
+                       out_quantizer = self.qact1.quantizer)
+        
+        #if apply_quant == True:
+        #    sys.exit()
+
         #print("[DEBUG] block qact1 start---------------------------------")
         x = self.qact1(x)
         #print("[DEBUG] block qact1 end---------------------------------")
@@ -356,7 +393,14 @@ class ViTBlock(tf.keras.layers.Layer):
         #print("[DEBUG] block qact2 end---------------------------------")
         
         shortcut = x
-        x = self.norm2(x, training=training)
+        print("----------------[DEBUG] Layer norm2 start------------------")
+        #print("[DEBUG] norm2 quantization mode: ", self.norm2.quant)
+        x = self.norm2(x, training=training,
+                       in_quantizer = self.qact2.quantizer,
+                       out_quantizer = self.qact3.quantizer)
+            
+            #print("[DEBUG] apply norm quantization finish")
+            #sys.exit()
         #print("[DEBUG] block qact3 start---------------------------------")
         x = self.qact3(x)
         #print("[DEBUG] block qact3 end---------------------------------")
@@ -369,6 +413,10 @@ class ViTBlock(tf.keras.layers.Layer):
         x = self.qact4(x)
         #print("[DEBUG] block qact4 end---------------------------------")
         
+        print("[DEBUG] qact1.observer: ", self.qact1.observer)
+        print("[DEBUG] qact2.observer: ", self.qact2.observer)
+        print("[DEBUG] qact3.observer: ", self.qact3.observer)
+        print("[DEBUG] qact4.observer: ", self.qact4.observer)
         #if x.shape[0] == 100:
         #    sys.exit()
         
@@ -441,11 +489,10 @@ class QViT(tf.keras.Model):
     def __init__(self, cfg: QViTConfig, *args, **kwargs):
         kwargs["name"] = kwargs.get("name", cfg.name)
         super().__init__(*args, **kwargs)
-        self.nb_features = cfg.embed_dim  # For consistency with other models
-        self.norm_layer = norm_layer_factory(cfg.norm_layer)
+        self.nb_features = cfg.embed_dim  # For consistency with other models       
+        self.norm_layer = QuantizedLayerNorm
         self.cfg = cfg
-        #print("[DEBUG] self.cfg: ", self.cfg)
-        #print("[DEBUG] bit_type: ", cfg.BIT_TYPE_A)
+
         quant = False
         calibrate = False
         input_quant = True
@@ -504,7 +551,7 @@ class QViT(tf.keras.Model):
                           calibration_mode=cfg.CALIBRATION_MODE_A_LN,
                           observer_str=cfg.OBSERVER_A_LN,
                           quantizer_str=cfg.QUANTIZER_A_LN)
-
+        
         self.blocks = [
             ViTBlock(
                 embed_dim=cfg.embed_dim,
@@ -514,7 +561,7 @@ class QViT(tf.keras.Model):
                 drop_rate=cfg.drop_rate,
                 attn_drop_rate=cfg.attn_drop_rate,
                 drop_path_rate=cfg.drop_path_rate,
-                norm_layer=cfg.norm_layer,
+                norm_layer=QuantizedLayerNorm,
                 act_layer=cfg.act_layer,
                 quant = quant,
                 calibrate = calibrate,
@@ -523,7 +570,7 @@ class QViT(tf.keras.Model):
             )
             for j in range(cfg.nb_blocks)
         ]
-        self.norm = self.norm_layer(name="norm")
+        self.norm = self.norm_layer(name="norm", eps = 1e-6)
         self.qact2 = QAct(quant=quant,
                           calibrate=calibrate,
                           bit_type=cfg.BIT_TYPE_A,
@@ -546,7 +593,14 @@ class QViT(tf.keras.Model):
 
         # Classifier head(s)
         self.head = (
-            QLinear(units=cfg.nb_classes, name="head")
+            QLinear(units=cfg.nb_classes, 
+                    quant=quant,
+                    calibrate=calibrate,
+                    bit_type=cfg.BIT_TYPE_W,
+                    calibration_mode=cfg.CALIBRATION_MODE_W,
+                    observer_str=cfg.OBSERVER_W,
+                    quantizer_str=cfg.QUANTIZER_W,
+                    name="head")
             if cfg.nb_classes > 0
             else tf.keras.layers.Activation("linear")  # Identity layer
         )
@@ -565,6 +619,8 @@ class QViT(tf.keras.Model):
                             calibration_mode=cfg.CALIBRATION_MODE_A,
                             observer_str=cfg.OBSERVER_A,
                             quantizer_str=cfg.QUANTIZER_A)
+        self.apply_calibrate = False
+        self.apply_quant = False
 
     def build(self, input_shape):
         self.cls_token = self.add_weight(
@@ -603,27 +659,50 @@ class QViT(tf.keras.Model):
         return list(features.keys())
     
     def quant(self):
-        for key, m in self.__dict__.items():
-            if type(m) in [QConv2d, QLinear, QAct]:
-                m.quant = True
-                
-            if type(m) == QPatchEmbeddings:
-                for sub_m in m.__dict__.values():
-                    if type(sub_m) in [QConv2d, QLinear, QAct]:
-                        sub_m.quant = True
-                               
-            if key == 'blocks':
-                for sub_m in m.__dict__['_last_wrapped_list_snapshot']:
-                    for ssub_m in sub_m.__dict__.values():
-                        if type(ssub_m) in [QConv2d, QLinear, QAct]:
-                            ssub_m.quant = True
-                            
-                        if type(ssub_m) in [ViTMultiHeadAttention, QMLP]:
-                            for s3ub_m in ssub_m.__dict__.values():
-                                if type(s3ub_m) in [QConv2d, QLinear, QAct]:
-                                    s3ub_m.quant = True
+        self.apply_quant = True
+        cnt = 0
+        for layer in self.layers:
+            if type(layer) == tf.keras.layers.Dropout:
+                print("[DEBUG] dropout")
+                continue
+            elif type(layer) in [QConv2d, QLinear, QAct]:
+                print("[DEBUG] QConv QLinear QAct")
+                layer.quant = True
+            elif type(layer) == QuantizedLayerNorm:
+                if self.cfg.INT_NORM:
+                    print("[DEBUG] Quantized Layer Norm")
+                    layer.quant = 'int'
+                #sys.exit()
+            elif type(layer) == ViTBlock:
+                print("[DEBUG] block")
+                for sub_layer in layer.quantized_layers:
+                    if type(sub_layer) in [QConv2d, QLinear, QAct]:
+                        sub_layer.quant = True
+                    elif type(sub_layer) == QuantizedLayerNorm:
+                        if self.cfg.INT_NORM:
+                            sub_layer.quant = 'int'
+                            print("[DEBUG] quantized layer norm")
+                        #sys.exit()
+                    elif type(sub_layer) == ViTMultiHeadAttention:
+                        for multihead_layer in sub_layer.quantized_layers:
+                            #print("[DEBUG] multihead_layer: ", multihead_layer)
+                            multihead_layer.quant = True
+                        #sys.exit()
+                    elif type(sub_layer) == QMLP:
+                        for mlp_layer in sub_layer.quantized_layers:
+                            mlp_layer.quant = True
+                    cnt += 1 
+                    print("[DEBUG] sub_layer: ", type(sub_layer))
+            elif type(layer) == QPatchEmbeddings:
+                for sub_layer in layer.quantized_layers:
+                    sub_layer.quant = True
+                    print("[DEBUG] QPatch Embeddings sub layer: ", type(sub_layer))
+            print("name: ", layer.name, " layer type: ", type(layer))
+        #sys.exit()
+            
         
     def open_calibrate(self):
+        self.apply_calibrate = True
         for key, m in self.__dict__.items():
             if type(m) in [QConv2d, QLinear, QAct]:
                 m.calibrate = True
@@ -641,7 +720,7 @@ class QViT(tf.keras.Model):
                             
                         if type(ssub_m) in [ViTMultiHeadAttention, QMLP]:
                             for s3ub_m in ssub_m.__dict__.values():
-                                if type(s3ub_m) in [QConv2d, QLinear, QAct]:
+                                if type(s3ub_m) in [QConv2d, QLinear, QAct, QuantizedSoftmax]:
                                     s3ub_m.calibrate = True
                                     
     def open_last_calibrate(self):
@@ -662,7 +741,7 @@ class QViT(tf.keras.Model):
                             
                         if type(ssub_m) in [ViTMultiHeadAttention, QMLP]:
                             for s3ub_m in ssub_m.__dict__.values():
-                                if type(s3ub_m) in [QConv2d, QLinear, QAct]:
+                                if type(s3ub_m) in [QConv2d, QLinear, QAct, QuantizedSoftmax]:
                                     s3ub_m.last_calibrate = True
                             
     def close_calibrate(self):
@@ -678,7 +757,7 @@ class QViT(tf.keras.Model):
                             
                         if type(ssub_m) == ViTMultiHeadAttention:
                             for s3ub_m in ssub_m.__dict__.values():
-                                if type(s3ub_m) in [QConv2d, QLinear, QAct]:
+                                if type(s3ub_m) in [QConv2d, QLinear, QAct, QuantizedSoftmax]:
                                     s3ub_m.calibrate = False
 
     def transform_pos_embed(self, target_cfg: QViTConfig):
@@ -697,6 +776,7 @@ class QViT(tf.keras.Model):
             x = self.qact_input(x)
 
         x, grid_size = self.patch_embed(x, return_shape=True)
+        
         #if x.shape[0] == 100:
         #    sys.exit()
         cls_token = tf.repeat(self.cls_token, repeats=batch_size, axis=0)
@@ -714,13 +794,14 @@ class QViT(tf.keras.Model):
             pos_embed = self.qact_pos(self.pos_embed)
             x = x + pos_embed
         else:
+            print("[DEBUG] interpolate")
+            pos_embed = self.qact_pos(pos_embed)
             pos_embed = interpolate_pos_embeddings(
                 self.pos_embed,
                 src_grid_size=self.cfg.grid_size,
                 tgt_grid_size=grid_size,
                 nb_tokens=self.cfg.nb_tokens,
             )
-            pos_embed = self.qact_pos(pos_embed)
             x = x + pos_embed
         #print("[DEBUG] after qact_pos-------------------------")
         #sys.exit()
@@ -729,18 +810,35 @@ class QViT(tf.keras.Model):
         #print("[DEBUG] after qact1---------------------------")
         x = self.pos_drop(x, training=training)
         features["patch_embedding"] = x
-
+        
+        print("[DEBUG] len block: ", len(self.blocks))
         for j, block in enumerate(self.blocks):
-            #print(f"-------------------------------------------[DEBUG] before {j}th block-----------------------------------------")
-            x = block(x, training=training, return_features=return_features)
+            last_quantizer = self.qact1.quantizer if j == 0 else self.blocks[j - 1].qact4.quantizer
+            x = block(x, training=training, 
+                      return_features=return_features,
+                      last_quantizer = last_quantizer,
+                      apply_quant = self.apply_quant)
             #print(f"-------------------------------------------[DEBUG] after {j}th block------------------------------------------")
             if return_features:
                 x, block_features = x
                 features[f"block_{j}/attn"] = block_features["attn"]
             features[f"block_{j}"] = x
-        x = self.norm(x, training=training)
+            
+            #if self.apply_quant == True:
+            #    sys.exit()
+            
+            #if x.shape[0] == 100:
+            #    sys.exit()
+
+        x = self.norm(x, training=training,
+                      in_quantizer = self.blocks[-1].qact4.quantizer,
+                      out_quantizer = self.qact2.quantizer,
+                      last = True)
+        #if self.apply_quant == True:
+        #    sys.exit()
         #print("----------------------AFter Block--------------------------")
-        
+        #if self.apply_quant == True:
+        #    sys.exit()
         features["features_all"] = x
 
         if self.cfg.distilled:
@@ -755,6 +853,7 @@ class QViT(tf.keras.Model):
         #print("[DEBUG] before qact2----------------------------------")
         #print("[DEBUG] qact2 input shape: ", x.shape)
         x = self.qact2(x)
+
         #print("[DEBUG] after qact2-----------------------------------")
         return (x, features) if return_features else x
 

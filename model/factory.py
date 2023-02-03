@@ -11,8 +11,10 @@ from tfimm.models.registry import is_model, model_class, model_config
 from tfimm.utils import cached_model_path, load_pth_url_weights, load_timm_weights
 from model.vit import QViT
 
+from quantizer import BIT_TYPE_DICT
+
 def create_model(
-    model_name: str,
+    args,
     pretrained: bool = False,
     model_path: str = "",
     *,
@@ -45,6 +47,7 @@ def create_model(
     Returns:
         The created model.
     """
+    model_name = args.model_name
     if not is_model(model_name):
         raise RuntimeError(f"Unknown model {model_name}.")
     
@@ -53,6 +56,17 @@ def create_model(
     #print("cls: ", cls)
     #sys.exit()
     cfg = model_config(model_name)
+    
+    if args.lis:
+        cfg.INT_SOFTMAX = True
+        cfg.BIT_TYPE_S = BIT_TYPE_DICT['uint4']
+        cfg.OBSERVER_S = 'minmax'
+        cfg.QUANTIZER_S = 'log2'
+    
+    if args.ptf:
+        cfg.INT_NORM = True
+        cfg.OBSERVER_A_LN = 'ptf'
+        cfg.CALIBRATION_MODE_A_LN = 'channel_wise'
 
     if model_path:
         loaded_model = tf.keras.models.load_model(model_path, compile=False)
