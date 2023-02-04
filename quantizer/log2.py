@@ -21,5 +21,4 @@ class Log2Quantizer(BaseQuantizer):
     def dequantize(self, inputs):
         outputs = 2**(-1 * inputs)
         outputs = tf.where(self.softmax_mask, 0, outputs)
-        #outputs[self.softmax_mask] = 0
         return outputs
