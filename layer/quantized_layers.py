@@ -1,3 +1,10 @@
+"""
+This code is modifed by Juhong from megvil-research repository.
+(Original: PyTorch -> Modified: TensorFlow2.0)
+https://github.com/megvii-research/FQ-ViT
+Licensed under the MIT license.
+"""
+
 import tensorflow as tf
 
 from quantizer import BIT_TYPE_DICT
@@ -53,12 +60,12 @@ class QAct(tf.keras.layers.Layer):
             return x
         x = self.quantizer(x, channel_first)
         return x
-    
-    
+
+
 class QLinear(tf.keras.layers.Dense):
 
     def __init__(self,
-                 units, 
+                 units,
                  use_bias=True,
                  quant=False,
                  calibrate=False,
@@ -70,7 +77,7 @@ class QLinear(tf.keras.layers.Dense):
                  quantizer_str='uniform'):
 
         super(QLinear, self).__init__(
-                units = units, 
+                units = units,
                 use_bias = use_bias,
                 name = name)
 
@@ -96,9 +103,9 @@ class QLinear(tf.keras.layers.Dense):
         if not self.quant:
             return super().call(x)
         self.kernel = self.quantizer(self.kernel, channel_first)
-        
+
         return super().call(x)
-    
+
 class QConv2d(tf.keras.layers.Conv2D):
 
     def __init__(self,
@@ -191,23 +198,23 @@ class QuantizedLayerNorm(tf.keras.layers.LayerNormalization):
             x_q_mean = tf.reduce_mean(x_q, axis = -1) * in_scale_min
             x_q_std  = (in_scale_min / channel_nums) * tf.sqrt(
                             channel_nums * x_q_square_sum - x_q_sum_square)
-            
+
             inter = (in_scale_min / x_q_std)[:, :, tf.newaxis]
             A = (in_scale_min / x_q_std)[:, :, tf.newaxis] * self.gamma[tf.newaxis, tf.newaxis, :] / out_scale
-            
+
             A_sign = tf.sign(A)
             M, N = self.get_MN(tf.abs(A))
 
             B = tf.round((self.beta[tf.newaxis, tf.newaxis, :] - (x_q_mean / x_q_std)[:,:,tf.newaxis] *
                           self.gamma[tf.newaxis, tf.newaxis, :]) / out_scale * tf.pow(2, N))
-            
+
 
             x_q = tf.round((A_sign * M * x_q + B) / tf.pow(2, N))
 
             outputs = x_q * out_scale
 
         return outputs
-    
+
 class QuantizedSoftmax(tf.keras.layers.Layer):
     def __init__(self,
                  log_i_softmax=False,
@@ -219,7 +226,7 @@ class QuantizedSoftmax(tf.keras.layers.Layer):
                  observer_str='minmax',
                  quantizer_str='uniform'):
         super(QuantizedSoftmax, self).__init__()
-        
+
         self.log_i_softmax = log_i_softmax
         self.quant = quant
         self.calibrate = calibrate
@@ -234,7 +241,7 @@ class QuantizedSoftmax(tf.keras.layers.Layer):
                                        self.bit_type, self.calibration_mode)
         self.quantizer = build_quantizer(self.quantizer_str, self.bit_type,
                                          self.observer, self.module_type)
-        
+
         self.max_bits = 32
 
         self.log2 = tf.math.log([2.])
@@ -295,9 +302,9 @@ class QuantizedSoftmax(tf.keras.layers.Layer):
         inverse_softmax = ste_round(tf.math.divide(x_exp_sum, x_exp))
 
         return inverse_softmax
-    
+
     def call(self, inputs, scale, channel_first = False):
-        
+
         if self.log_i_softmax and scale is not None:
             inv_softmax = self.int_inverse_softmax(inputs, scale)
             log2_quant_inv_softmax = self.log2_quant(inv_softmax)
@@ -315,22 +322,22 @@ class QuantizedSoftmax(tf.keras.layers.Layer):
                     self.quantizer.update_quantization_params(x, channel_first)
             if not self.quant:
                 return x
-            
+
             x = self.quantizer(x, channel_first)
             return x
 
 # Module Test
 if __name__ == '__main__':
-    
+
     data_dir = "../../FQ-ViT/"
     np_input = np.load(data_dir + "softmax_x.npy")
     np_scale = np.load(data_dir + "softmax_scale.npy")
     np_output = np.load(data_dir + "deq_softmax.npy")
-    
+
     pt_input = tf.convert_to_tensor(np_input)
     pt_scale = tf.convert_to_tensor(np_scale)
     pt_output = tf.convert_to_tensor(np_output)
-    
+
     quantized_softmax = QuantizedSoftmax(log_i_softmax=True,
                                           quant=False,
                                           calibrate=False,
@@ -338,11 +345,11 @@ if __name__ == '__main__':
                                           calibration_mode='layer_wise',
                                           observer_str='minmax',
                                           quantizer_str='log2')
-    
+
     tf_output = quantized_softmax(pt_input, pt_scale)
-    
+
     print("tf_output.shape: ", tf_output.shape)
     print("pt_output: ", pt_output[0,0,0,0:3])
     print("tf_output: ", tf_output[0,0,0,0:3])
-    
+
     print("[DEBUG] np is close: ", np.allclose(tf_output.numpy(), np_output, rtol = 1e-2, atol = 1e-2, equal_nan = False))

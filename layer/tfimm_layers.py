@@ -1,3 +1,10 @@
+"""
+This code is modifed by Juhong from megvil-research repository.
+(Original: PyTorch -> Modified: TensorFlow2.0)
+https://github.com/megvii-research/FQ-ViT
+Licensed under the MIT license.
+"""
+
 from typing import Optional
 
 import tensorflow as tf
@@ -56,7 +63,7 @@ class QMLP(tf.keras.layers.Layer):
 
         self.drop1 = tf.keras.layers.Dropout(rate=drop_rate)
         self.drop2 = tf.keras.layers.Dropout(rate=drop_rate)
-        
+
         self.quantized_layers = [self.fc1, self.qact1, self.fc2, self.qact2]
 
     def call(self, x, training=False):
@@ -64,14 +71,14 @@ class QMLP(tf.keras.layers.Layer):
         x = self.act(x)
         x = self.qact1(x)
         x = self.drop1(x, training=training)
-        
+
         x = self.fc2(x)
         x = self.qact2(x)
         x = self.drop2(x, training=training)
 
         return x
-    
-    
+
+
 class QPatchEmbeddings(tf.keras.layers.Layer):
     """
     Image to Patch Embedding.
@@ -140,7 +147,7 @@ class QPatchEmbeddings(tf.keras.layers.Layer):
             quantizer_str=cfg.QUANTIZER_W,
             name="proj",
         )
-        
+
         self.norm = self.norm_layer(name="norm")
         self.qact = QAct(quant=quant,
                          calibrate=calibrate,
@@ -148,7 +155,7 @@ class QPatchEmbeddings(tf.keras.layers.Layer):
                          calibration_mode=cfg.CALIBRATION_MODE_A,
                          observer_str=cfg.OBSERVER_A,
                          quantizer_str=cfg.QUANTIZER_A)
-        
+
         self.quantized_layers = [self.projection, self.qact]
 
     def call(self, x, training=False, return_shape=False):
@@ -172,7 +179,7 @@ class QPatchEmbeddings(tf.keras.layers.Layer):
         x = self.pad(x)
         x = self.projection(x)
         #x = self.qact_before_norm(x)
-        
+
         batch_size, height, width = tf.unstack(tf.shape(x)[:3])
         if self.flatten:
             # Change the 2D spatial dimensions to a single temporal dimension.
@@ -180,5 +187,5 @@ class QPatchEmbeddings(tf.keras.layers.Layer):
 
         x = self.norm(x, training=training)
         x = self.qact(x)
-        
+
         return (x, (height, width)) if return_shape else x

@@ -1,3 +1,10 @@
+"""
+TensorFlow implementation of the Visual Transformer
+Based on timm/models/visual_transformer.py by Ross Wightman.
+Based on transformers/models/vit by HuggingFace
+Copyright 2021 Martins Bruveris
+"""
+
 import logging
 import re
 import sys
@@ -50,16 +57,16 @@ def create_model(
     model_name = args.model_name
     if not is_model(model_name):
         raise RuntimeError(f"Unknown model {model_name}.")
-    
+
     cls = model_class(model_name)
     cfg = model_config(model_name)
-    
+
     if args.lis:
         cfg.INT_SOFTMAX = True
         cfg.BIT_TYPE_S = BIT_TYPE_DICT['uint4']
         cfg.OBSERVER_S = 'minmax'
         cfg.QUANTIZER_S = 'log2'
-    
+
     if args.ptf:
         cfg.INT_NORM = True
         cfg.OBSERVER_A_LN = 'ptf'
